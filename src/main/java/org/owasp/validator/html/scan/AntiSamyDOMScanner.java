@@ -23,18 +23,9 @@
  */
 package org.owasp.validator.html.scan;
 
-import java.io.IOException;
-import java.io.StringReader;
-import java.io.StringWriter;
-import java.util.List;
-import java.util.Queue;
-import java.util.concurrent.Callable;
-import java.util.concurrent.ConcurrentLinkedQueue;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
+import net.sf.saxon.trace.XSLTTraceListener;
 import net.sourceforge.htmlunit.cyberneko.parsers.DOMFragmentParser;
 import org.apache.batik.css.parser.ParseException;
-import org.apache.xerces.dom.DocumentImpl;
 import org.owasp.validator.css.CssScanner;
 import org.owasp.validator.html.CleanResults;
 import org.owasp.validator.html.Policy;
@@ -48,6 +39,7 @@ import org.w3c.dom.Comment;
 import org.w3c.dom.DOMException;
 import org.w3c.dom.Document;
 import org.w3c.dom.DocumentFragment;
+import org.w3c.dom.DocumentType;
 import org.w3c.dom.Element;
 import org.w3c.dom.NamedNodeMap;
 import org.w3c.dom.Node;
@@ -59,6 +51,27 @@ import org.xml.sax.SAXException;
 import org.xml.sax.SAXNotRecognizedException;
 import org.xml.sax.SAXNotSupportedException;
 
+import javax.xml.XMLConstants;
+import javax.xml.parsers.DocumentBuilder;
+import javax.xml.parsers.DocumentBuilderFactory;
+import javax.xml.parsers.ParserConfigurationException;
+import javax.xml.transform.OutputKeys;
+import javax.xml.transform.Transformer;
+import javax.xml.transform.TransformerConfigurationException;
+import javax.xml.transform.TransformerException;
+import javax.xml.transform.TransformerFactory;
+import javax.xml.transform.dom.DOMSource;
+import javax.xml.transform.stream.StreamResult;
+import java.io.StringReader;
+import java.io.StringWriter;
+import java.nio.charset.StandardCharsets;
+import java.util.List;
+import java.util.Queue;
+import java.util.concurrent.Callable;
+import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
 /**
  * This is where the magic lives (all the HTML scanning/filtration logic resides here). This class
  * should not be called directly. All scanning should be done through an <code>AntiSamy.scan()
@@ -67,7 +80,7 @@ import org.xml.sax.SAXNotSupportedException;
  * @author Arshan Dabirsiaghi
  */
 public class AntiSamyDOMScanner extends AbstractAntiSamyScanner {
-  private Document document = new DocumentImpl();
+  private Document document = createFreshDocument();
   private DocumentFragment dom = document.createDocumentFragment();
   private CleanResults results = null;
   private static final int maxDepth = 250;
@@ -96,7 +109,7 @@ public class AntiSamyDOMScanner extends AbstractAntiSamyScanner {
    *
    * @param policy The policy to use.
    */
-  public AntiSamyDOMScanner(Policy policy) {
+  public AntiSamyDOMScanner(Policy policy) throws ScanException {
     super(policy);
   }
 
@@ -106,7 +119,7 @@ public class AntiSamyDOMScanner extends AbstractAntiSamyScanner {
    * @throws PolicyException thrown when there is a problem validating or parsing the policy file.
    *     Any validation errors not caught by the XML validation will be thrown with this exception.
    */
-  public AntiSamyDOMScanner() throws PolicyException {
+  public AntiSamyDOMScanner() throws PolicyException, ScanException {
     super();
   }
 
@@ -179,22 +192,88 @@ public class AntiSamyDOMScanner extends AbstractAntiSamyScanner {
        * its string representation.
        */
 
-      final String trimmedHtml = html;
+      final String trimmedHtml = "<root>" + html + "</root>";
 
-      StringWriter out = new StringWriter();
+      StringWriter out = new StringWriter(html.length());
 
-      @SuppressWarnings("deprecation")
-      org.apache.xml.serialize.OutputFormat format = getOutputFormat();
+//      @SuppressWarnings("deprecation")
+//      org.apache.xml.serialize.OutputFormat format = getOutputFormat();
+//
+//      //noinspection deprecation
+//      org.apache.xml.serialize.HTMLSerializer serializer = getHTMLSerializer(out, format);
+//      serializer.serialize(dom);
 
-      //noinspection deprecation
-      org.apache.xml.serialize.HTMLSerializer serializer = getHTMLSerializer(out, format);
-      serializer.serialize(dom);
+      final Document ownerDocument = dom.getOwnerDocument();
+      final String xmlEncoding = ownerDocument.getXmlEncoding();
+
+      final TransformerFactory tf = TransformerFactory.newInstance();
+      tf.setAttribute(XMLConstants.ACCESS_EXTERNAL_DTD, "");
+      tf.setAttribute(XMLConstants.ACCESS_EXTERNAL_STYLESHEET, "");
+      final Transformer t;
+      try {
+        tf.setFeature(XMLConstants.FEATURE_SECURE_PROCESSING, true);
+        t = tf.newTransformer();
+      } catch (TransformerConfigurationException e) {
+        throw new ScanException(e);
+      }
+      tf.setAttribute("http://saxon.sf.net/feature/traceListener", new XSLTTraceListener());
+
+      if (xmlEncoding != null) {
+        t.setOutputProperty(OutputKeys.ENCODING, xmlEncoding);
+      } else {
+        t.setOutputProperty(OutputKeys.ENCODING, StandardCharsets.UTF_8.name());
+      }
+
+      final Document processingDocument = createFreshDocument();
+      final boolean entityEncodeIntlCharacters = policy.isEntityEncodeIntlCharacters();
+      final Node processingDom = processingDocument.importNode(dom, true);
+      final Node processingRoot = processingDocument.createElement("root");
+      processingDocument.appendChild(processingRoot);
+      if (!entityEncodeIntlCharacters) {
+        processingRoot.appendChild(
+                processingDocument.createProcessingInstruction(
+                        StreamResult.PI_DISABLE_OUTPUT_ESCAPING, ""));
+      }
+      processingRoot.appendChild(processingDom);
+      if (!entityEncodeIntlCharacters) {
+        processingRoot.appendChild(
+                processingDocument.createProcessingInstruction(
+                        StreamResult.PI_ENABLE_OUTPUT_ESCAPING, ""));
+      }
+
+      t.setOutputProperty(OutputKeys.METHOD, "html");
+      t.setOutputProperty(OutputKeys.OMIT_XML_DECLARATION, policy.isOmitXmlDeclaration() ? "yes" : "no");
+      final DocumentType doctype = document.getDoctype();
+      if (!policy.isOmitDoctypeDeclaration() && doctype != null) {
+        final String publicId = doctype.getPublicId();
+        if (publicId != null) {
+          t.setOutputProperty(OutputKeys.DOCTYPE_PUBLIC, publicId);
+        }
+        final String systemId = doctype.getSystemId();
+        if (systemId != null) {
+          t.setOutputProperty(OutputKeys.DOCTYPE_SYSTEM, systemId);
+        }
+      }
+
+      //format.setPreserveEmptyAttributes(true);
+      //format.setPreserveSpace(policy.isPreserveSpace());
+      if (policy.isFormatOutput()) {
+        t.setOutputProperty(OutputKeys.INDENT, "yes");
+        try {
+          t.setOutputProperty("{http://xml.apache.org/xslt}indent-amount", "2");
+        } catch (final IllegalArgumentException ignored) {
+          // Ignore the exception. The indent-amount is not supported by this transformer implementation.
+        }
+      }
+
+      //t.transform(new DOMSource(processingRoot.getChildNodes().item(1)), new StreamResult(out));
+      t.transform(new DOMSource(processingRoot), new StreamResult(out));
 
       /*
        * Get the String out of the StringWriter and rip out the XML
        * declaration if the Policy says we should.
        */
-      final String trimmed = trim(trimmedHtml, out.getBuffer().toString());
+      final String trimmed = trim(trimmedHtml, out.toString());
 
       Callable<String> cleanHtml =
           new Callable<String>() {
@@ -211,9 +290,24 @@ public class AntiSamyDOMScanner extends AbstractAntiSamyScanner {
       cachedItems.add(cachedItem);
       return results;
 
-    } catch (SAXException | IOException e) {
+    } catch (SAXException e) {
+      throw new ScanException(e);
+    } catch (TransformerException e) {
       throw new ScanException(e);
     }
+  }
+
+  private static Document createFreshDocument() throws ScanException {
+    final DocumentBuilderFactory dbf = DocumentBuilderFactory.newInstance();
+    dbf.setNamespaceAware(true);
+    final DocumentBuilder builder;
+    try {
+      dbf.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);
+      builder = dbf.newDocumentBuilder();
+    } catch (ParserConfigurationException e) {
+      throw new ScanException(e);
+    }
+    return builder.newDocument();
   }
 
   static DOMFragmentParser getDomParser()

@@ -1342,8 +1342,8 @@ public class AntiSamyTest {
     crDom = as.scan(goodInput, policy, AntiSamy.DOM).getCleanHTML();
     crSax = as.scan(goodInput, policy, AntiSamy.SAX).getCleanHTML();
 
-    assertTrue(crSax.contains("left"));
-    assertTrue(crDom.contains("left"));
+    assertThat(crSax, containsString("left"));
+    assertThat(crDom, containsString("left"));
   }
 
   @Test
@@ -1473,8 +1473,10 @@ public class AntiSamyTest {
     String html = "<b>letter 'a' with umlaut: \u00e4";
     String crDom = as.scan(html, revised, AntiSamy.DOM).getCleanHTML();
     String crSax = as.scan(html, revised, AntiSamy.SAX).getCleanHTML();
-    assertTrue(crDom.contains("\u00e4"));
-    assertTrue(crSax.contains("\u00e4"));
+    assertThat(crDom, containsString("\u00e4"));
+    //assertTrue(crDom.contains("\u00e4"));
+    assertThat(crSax, containsString("\u00e4"));
+    //assertTrue(crSax.contains("\u00e4"));
 
     Policy revised2 = policy.cloneWithDirective(Policy.ENTITY_ENCODE_INTL_CHARS, "true");
     crDom = as.scan(html, revised2, AntiSamy.DOM).getCleanHTML();
@@ -1495,8 +1497,10 @@ public class AntiSamyTest {
     String crDom = as.scan(html, revised, AntiSamy.DOM).getCleanHTML();
     String crSax = as.scan(html, revised, AntiSamy.SAX).getCleanHTML();
 
-    assertTrue(html.equals(crDom));
-    assertTrue(html.equals(crSax));
+    assertThat(html, equalTo(crDom));
+    //assertTrue(html.equals(crDom));
+    assertThat(html, equalTo(crSax));
+    //assertTrue(html.equals(crSax));
   }
 
   /*
